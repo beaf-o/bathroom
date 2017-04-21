@@ -33,19 +33,22 @@ PubSubClient client(wifiClient);
 const PROGMEM int OTA_PORT = 8266;
 const PROGMEM char* DEFAULT_PW = "****";
 const PROGMEM char* MQTT_SERVER_IP = "****";
+const PROGMEM char* MQTT_FALLBACK_SERVER_IP = "****";
 const PROGMEM uint16_t MQTT_SERVER_PORT = 1883;
-const PROGMEM char* MQTT_USER = "home-assistant";
-const PROGMEM char* MQTT_PASSWORD = "****;
+const PROGMEM char* MQTT_USER = "****";
+const PROGMEM char* MQTT_PASSWORD = "****";
 // CREDENTIALS SECTION - END
 
-const PROGMEM char* MQTT_ESP_STATE_TOPIC = "home-assistant/esp/bathroom/status";
-const PROGMEM char* MQTT_ESP_IP_TOPIC = "home-assistant/esp/bathroom/ip";
+const PROGMEM char* ESP_STATE_TOPIC = "home-assistant/esp/bathroom/status";
+const PROGMEM char* ESP_IP_TOPIC = "home-assistant/esp/bathroom/ip";
 
-const PROGMEM char* MQTT_SPOTS_STATE_TOPIC = "home-assistant/bathroom/spots/status";
-const PROGMEM char* MQTT_SPOTS_COMMAND_TOPIC = "home-assistant/bathroom/spots/switch";
+const PROGMEM char* SPOTS_STATE_TOPIC = "home-assistant/bathroom/spots/status";
+const PROGMEM char* SPOTS_COMMAND_TOPIC = "home-assistant/bathroom/spots/switch";
 
-const PROGMEM char* MQTT_STRIPES_STATE_TOPIC = "home-assistant/bathroom/stripes/status";
-const PROGMEM char* MQTT_STRIPES_COMMAND_TOPIC = "home-assistant/bathroom/stripes/set";
+const PROGMEM char* STRIPES_STATE_TOPIC = "home-assistant/bathroom/stripes/status";
+const PROGMEM char* STRIPES_COMMAND_TOPIC = "home-assistant/bathroom/stripes/set";
+
+const PROGMEM char* PANIC_TOPIC = "home-assistant/panic";
 
 // buffer used to send/receive data with MQTT
 const uint8_t MSG_BUFFER_SIZE = 20;
@@ -63,6 +66,7 @@ const PROGMEM uint8_t DEFAULT_BRIGHTNESS = 50;
 boolean spotsState = true;
 boolean stripesState = true;
 
+boolean panicMode = false;
 boolean isInitial = true;
 
 // Maintained state for reporting to HA
@@ -134,10 +138,10 @@ void publishSpotsState() {
   Serial.print("Publish spots state: ");
   
   if (spotsState) {
-    client.publish(MQTT_SPOTS_STATE_TOPIC, LIGHT_ON, true);
+    client.publish(SPOTS_STATE_TOPIC, LIGHT_ON, true);
     Serial.println("ON");
   } else {
-    client.publish(MQTT_SPOTS_STATE_TOPIC, LIGHT_OFF, true);
+    client.publish(SPOTS_STATE_TOPIC, LIGHT_OFF, true);
     Serial.println("OFF");
   }
 }
@@ -171,8 +175,9 @@ void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
   Serial.print(payload);
   Serial.println("'");
   
-  // handle message topic
-  if (String(MQTT_SPOTS_COMMAND_TOPIC).equals(p_topic)) {
+  if (String(PANIC_TOPIC).equals(p_topic)) {
+    handlePanicTopic(payload);
+  } else if (String(SPOTS_COMMAND_TOPIC).equals(p_topic)) {
     // test if the payload is equal to "ON" or "OFF"
     if (payload.equals(String(LIGHT_ON)) && spotsState == false) {
       spotsState = true;
@@ -182,7 +187,7 @@ void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
       toggleSpots();
     }
     publishSpotsState();
-  } else if (String(MQTT_STRIPES_COMMAND_TOPIC).equals(p_topic)) {
+  } else if (String(STRIPES_COMMAND_TOPIC).equals(p_topic)) {
     char message[p_length + 1];
     for (int i = 0; i < p_length; i++) {
       message[i] = (char)payload[i];
@@ -284,6 +289,19 @@ bool processJson(char* message) {
   return true;
 }
 
+void handlePanicTopic(String payload) {
+  if (payload.equals("ON")) {
+    Serial.println("----------------------------------------");
+    Serial.println("-----          PANIC MODE          -----");
+    Serial.println("----------------------------------------");
+
+    panicMode = true;
+  } else if (panicMode != false && payload.equals("OFF")) {
+    panicMode = false;
+    Serial.println("Set panic mode = false");
+  }
+}
+
 void publishStripesState() {
   StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
 
@@ -300,7 +318,7 @@ void publishStripesState() {
   char buffer[root.measureLength() + 1];
   root.printTo(buffer, sizeof(buffer));
 
-  client.publish(MQTT_STRIPES_STATE_TOPIC, buffer, true);
+  client.publish(STRIPES_STATE_TOPIC, buffer, true);
 }
 
 void reconnect() {
@@ -310,8 +328,9 @@ void reconnect() {
     // Attempt to connect
     if (client.connect(CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("INFO: connected");
-      client.subscribe(MQTT_STRIPES_COMMAND_TOPIC);
-      client.subscribe(MQTT_SPOTS_COMMAND_TOPIC);
+      client.subscribe(PANIC_TOPIC);
+      client.subscribe(STRIPES_COMMAND_TOPIC);
+      client.subscribe(SPOTS_COMMAND_TOPIC);
     } else {
       Serial.print("ERROR: failed, rc=");
       Serial.println(client.state());
@@ -422,11 +441,6 @@ String IpAddress2String(const IPAddress& ipAddress){
 }
 
 void loop(void) {
-  wdt_disable();
-
-  //Serial.println(i++);
-  //delay(400);
-  
   server.handleClient(); 
 
   if (!client.connected()) {
@@ -437,17 +451,32 @@ void loop(void) {
     IPAddress ipAddress = WiFi.localIP();
     String ipString = IpAddress2String(ipAddress);
 
-    client.publish(MQTT_ESP_STATE_TOPIC, "online", true);
-    client.publish(MQTT_ESP_IP_TOPIC, ipString.c_str(), true);
+    client.publish(ESP_STATE_TOPIC, "online", true);
+    client.publish(ESP_IP_TOPIC, ipString.c_str(), true);
     
-    client.publish(MQTT_SPOTS_STATE_TOPIC, LIGHT_ON, true);
-    //client.publish(MQTT_SPOTS_COMMAND_TOPIC, LIGHT_ON, true);
+    client.publish(SPOTS_STATE_TOPIC, LIGHT_ON, true);
+    //client.publish(SPOTS_COMMAND_TOPIC, LIGHT_ON, true);
   }
   
   client.loop();
 
+  if (panicMode == true) {
+    blinkRed();
+  }
+
   handleStripes();
   isInitial = false;
+}
+
+void blinkRed() {
+  for (int br = 0; br < 100; br++) {
+
+    setColor(255, 0, 0);
+    delay(500);
+  
+    setColor(0, 0, 0);
+    delay(500);
+  }
 }
 
 void handleStripes() {
