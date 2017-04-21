@@ -4,6 +4,8 @@
 #include <ESP8266mDNS.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>
+#include <ArduinoOTA.h>
 
 /**
 static const uint8_t D0   = 16;
@@ -19,24 +21,25 @@ static const uint8_t D9   = 3;
 static const uint8_t D10  = 1;
 */
 
+const PROGMEM char* CLIENT_ID = "bathroom-main"; // bathroom-mirror
+
 IPAddress ip(192,168,178,200);
-IPAddress dns(192,168,178,5);
-IPAddress gateway(192,168,178,5);
-const char* ssid = "404 Network not found";
-const char* password = "*****";
 
 WiFiClient wifiClient;
 ESP8266WebServer server(80);
 PubSubClient client(wifiClient);
 
-// MQTT: ID, server IP, port, username and password
-const PROGMEM char* MQTT_CLIENT_ID = "bathroom-inside";
-const PROGMEM char* MQTT_SERVER_IP = "192.168.0.35";
-const PROGMEM uint16_t MQTT_SERVER_PORT = 1883; //1885;
+// CREDENTIALS SECTION - START
+const PROGMEM int OTA_PORT = 8266;
+const PROGMEM char* DEFAULT_PW = "****";
+const PROGMEM char* MQTT_SERVER_IP = "****";
+const PROGMEM uint16_t MQTT_SERVER_PORT = 1883;
 const PROGMEM char* MQTT_USER = "home-assistant";
-const PROGMEM char* MQTT_PASSWORD = "*****";
+const PROGMEM char* MQTT_PASSWORD = "****;
+// CREDENTIALS SECTION - END
 
 const PROGMEM char* MQTT_ESP_STATE_TOPIC = "home-assistant/esp/bathroom/status";
+const PROGMEM char* MQTT_ESP_IP_TOPIC = "home-assistant/esp/bathroom/ip";
 
 const PROGMEM char* MQTT_SPOTS_STATE_TOPIC = "home-assistant/bathroom/spots/status";
 const PROGMEM char* MQTT_SPOTS_COMMAND_TOPIC = "home-assistant/bathroom/spots/switch";
@@ -59,6 +62,8 @@ const PROGMEM uint8_t DEFAULT_BRIGHTNESS = 50;
 // variables used to store the state, the brightness and the color of the light
 boolean spotsState = true;
 boolean stripesState = true;
+
+boolean isInitial = true;
 
 // Maintained state for reporting to HA
 byte red = 0;
@@ -303,7 +308,7 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("INFO: Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
+    if (client.connect(CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("INFO: connected");
       client.subscribe(MQTT_STRIPES_COMMAND_TOPIC);
       client.subscribe(MQTT_SPOTS_COMMAND_TOPIC);
@@ -327,6 +332,7 @@ void setup(void){
   setupWifi();
   setupHttpServer();
   setupMqtt();
+  setupOTA();
 }
 
 void setupButtons() {
@@ -343,29 +349,22 @@ void setupSpots() {
 }
 
 void setupStripes() {
-
-  //Setup defaults
   analogWriteRange(255);
   setColor(0, 0, 255);  
 }
 
 void setupWifi() {
   delay(10);
-  //WiFi.config(ip, dns, gateway);
-  WiFi.begin(ssid, password);
-  Serial.println("");
+  WiFiManager wifiManager;
+  wifiManager.setTimeout(180);
 
-  // Wait for connection
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  if (!wifiManager.autoConnect(CLIENT_ID, DEFAULT_PW)) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    //reset and try again, or maybe put it to deep sleep
+    ESP.reset();
+    delay(5000);
   }
-  
-  Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(ssid);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());  
 }
 
 void setupHttpServer() {
@@ -386,7 +385,42 @@ void setupMqtt() {
   client.setCallback(callback);
 }
 
-int i = 0;
+void setupOTA() {
+  ArduinoOTA.setPort(OTA_PORT);
+  ArduinoOTA.setHostname(CLIENT_ID);
+  ArduinoOTA.setPassword(DEFAULT_PW);
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Starting OTA");
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  
+  ArduinoOTA.begin();
+}
+
+String IpAddress2String(const IPAddress& ipAddress){
+  return String(ipAddress[0]) + String(".") +\
+    String(ipAddress[1]) + String(".") +\
+    String(ipAddress[2]) + String(".") +\
+    String(ipAddress[3]); 
+}
+
 void loop(void) {
   wdt_disable();
 
@@ -398,18 +432,22 @@ void loop(void) {
   if (!client.connected()) {
     reconnect();
   }
-  
-  if (i == 0) {
-    //publish spots on in intial loop 
-    client.publish(MQTT_SPOTS_STATE_TOPIC, LIGHT_ON, true);
-    client.publish(MQTT_SPOTS_COMMAND_TOPIC, LIGHT_ON, true);
+
+  if (isInitial == true) {
+    IPAddress ipAddress = WiFi.localIP();
+    String ipString = IpAddress2String(ipAddress);
+
     client.publish(MQTT_ESP_STATE_TOPIC, "online", true);
+    client.publish(MQTT_ESP_IP_TOPIC, ipString.c_str(), true);
+    
+    client.publish(MQTT_SPOTS_STATE_TOPIC, LIGHT_ON, true);
+    //client.publish(MQTT_SPOTS_COMMAND_TOPIC, LIGHT_ON, true);
   }
   
   client.loop();
 
   handleStripes();
-  i++;
+  isInitial = false;
 }
 
 void handleStripes() {
@@ -422,15 +460,13 @@ void handleStripes() {
     if ((millis() - flashStartTime) <= flashLength) {
       if ((millis() - flashStartTime) % 1000 <= 500) {
         setColor(flashRed, flashGreen, flashBlue);
-      }
-      else {
+      } else {
         setColor(0, 0, 0);
         // If you'd prefer the flashing to happen "on top of"
         // the current color, uncomment the next line.
         // setColor(realRed, realGreen, realBlue);
       }
-    }
-    else {
+    } else {
       flash = false;
       setColor(realRed, realGreen, realBlue);
     }
@@ -446,8 +482,7 @@ void handleStripes() {
       bluVal = realBlue;
 
       startFade = false;
-    }
-    else {
+    } else {
       loopCount = 0;
       stepR = calculateStep(redVal, realRed);
       stepG = calculateStep(grnVal, realGreen);
@@ -473,8 +508,7 @@ void handleStripes() {
         Serial.print("Loop count: ");
         Serial.println(loopCount);
         loopCount++;
-      }
-      else {
+      } else {
         inFade = false;
       }
     }
@@ -549,8 +583,7 @@ int calculateVal(int step, int val, int i) {
     if ((step) && i % step == 0) { // If step is non-zero and its time to change a value,
         if (step > 0) {              //   increment the value if step is positive...
             val += 1;
-        }
-        else if (step < 0) {         //   ...or decrement it if step is negative
+        } else if (step < 0) {         //   ...or decrement it if step is negative
             val -= 1;
         }
     }
@@ -558,8 +591,7 @@ int calculateVal(int step, int val, int i) {
     // Defensive driving: make sure val stays in the range 0-255
     if (val > 255) {
         val = 255;
-    }
-    else if (val < 0) {
+    } else if (val < 0) {
         val = 0;
     }
     
